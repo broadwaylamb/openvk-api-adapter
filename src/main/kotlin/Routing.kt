@@ -14,11 +14,33 @@ import io.ktor.server.routing.*
 import io.ktor.util.*
 import io.ktor.util.logging.*
 import io.ktor.utils.io.*
+import java.security.SecureRandom
+import java.security.cert.X509Certificate
+import javax.net.ssl.SSLContext
+import javax.net.ssl.X509TrustManager
+
+private object TrustAllX509TrustManager : X509TrustManager {
+    override fun getAcceptedIssuers(): Array<X509Certificate?> = arrayOfNulls(0)
+
+    override fun checkClientTrusted(certs: Array<X509Certificate?>?, authType: String?) {}
+
+    override fun checkServerTrusted(certs: Array<X509Certificate?>?, authType: String?) {}
+}
 
 private val ovkClient = HttpClient(Java) {
     defaultRequest {
         url("https://ovk.to")
         headers["Host"] = "ovk.to"
+    }
+    engine {
+        config {
+            sslContext(
+                SSLContext.getInstance("TLS")
+                    .apply {
+                        init(null, arrayOf(TrustAllX509TrustManager), SecureRandom())
+                    }
+            )
+        }
     }
 }
 
