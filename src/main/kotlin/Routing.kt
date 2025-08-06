@@ -12,62 +12,90 @@ import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import io.ktor.util.*
+import io.ktor.util.logging.*
 import io.ktor.utils.io.*
-
 
 private val ovkClient = HttpClient(Java) {
     defaultRequest {
         url("https://ovk.to")
+        headers["Host"] = "ovk.to"
     }
 }
 
-//private fun Routing.proxyGet(path: String) {
-//    get(path) {
-//        val ovkResponse = ovkClient.request {
-//            request
-//        }
-////        call.respondBytes
-//    }
-//}
+private suspend inline fun <reified Result : Any> RoutingContext.transform(
+    method: HttpMethod,
+    uri: String,
+    transformation: (HttpResponse) -> Result,
+) {
+    try {
+        val response = ovkClient.request {
+            this.method = method
+            headers.appendAll(call.request.headers)
+            setBody(call.receive<ByteArray>())
+            url(uri)
+        }
+        call.respond(transformation(response))
+    } catch (e: Throwable) {
+        call.application.log.error(e)
+    }
+}
+
+private suspend fun RoutingContext.proxy(
+    method: HttpMethod,
+    buildRequest: HttpRequestBuilder.() -> Unit,
+) {
+    try {
+        val response = ovkClient.request {
+            this.method = method
+            headers.appendAll(call.request.headers)
+            setBody(call.receive<ByteArray>())
+            buildRequest()
+        }
+
+        val proxiedHeaders = response.headers
+        val contentType = proxiedHeaders[HttpHeaders.ContentType]
+
+        val contentLength = proxiedHeaders[HttpHeaders.ContentLength]
+        call.respond(object : OutgoingContent.WriteChannelContent() {
+            override val contentLength: Long? = contentLength?.toLong()
+            override val contentType: ContentType? =
+                contentType?.let { ContentType.parse(it) }
+            override val headers: Headers = Headers.build {
+                appendAll(proxiedHeaders.filter { key, _ ->
+                    !key.equals(HttpHeaders.TransferEncoding, ignoreCase = true ) && !key.equals( HttpHeaders.ContentType, ignoreCase = true ) && !key.equals(HttpHeaders.ContentLength, ignoreCase = true)
+                })
+            }
+            override val status: HttpStatusCode
+                get() = response.status
+
+            override suspend fun writeTo(channel: ByteWriteChannel) {
+                channel.writeByteArray(response.readRawBytes())
+                channel.flushAndClose()
+            }
+        })
+    } catch (e: Throwable) {
+        call.application.log.error(e)
+    }
+}
 
 fun Application.configureRouting() {
     routing {
         get("/token/") {
-            val response = ovkClient.get("/token") {
-                url.parameters.appendAll(call.request.rawQueryParameters)
+            proxy(HttpMethod.Get) {
+                url {
+                    path("token")
+                    parameters.appendAll(call.queryParameters)
+                }
             }
-            call.respondBytes(response.readRawBytes())
+        }
+        get("/nim*") {
+            proxy(HttpMethod.Get) {
+                url(call.request.uri)
+            }
         }
         post("/method/*") {
-            try {
-                val response = ovkClient.post(call.request.uri) {
-                    headers.appendAll(call.request.headers)
-                    headers["Host"] = "ovk.to"
-                    setBody(call.receive<ByteArray>())
-                }
-
-                val proxiedHeaders = response.headers
-                val contentType = proxiedHeaders[HttpHeaders.ContentType]
-                val contentLength = proxiedHeaders[HttpHeaders.ContentLength]
-                call.respond(object : OutgoingContent.WriteChannelContent() {
-                    override val contentLength: Long? = contentLength?.toLong()
-                    override val contentType: ContentType? =
-                        contentType?.let { ContentType.parse(it) }
-                    override val headers: Headers = Headers.build {
-                        appendAll(proxiedHeaders.filter { key, _ ->
-                            !key.equals(HttpHeaders.TransferEncoding, ignoreCase = true ) && !key.equals( HttpHeaders.ContentType, ignoreCase = true ) && !key.equals(HttpHeaders.ContentLength, ignoreCase = true)
-                        })
-                    }
-                    override val status: HttpStatusCode
-                        get() = response.status
-
-                    override suspend fun writeTo(channel: ByteWriteChannel) {
-                        channel.writeByteArray(response.readRawBytes())
-                        channel.flushAndClose()
-                    }
-                })
-            } catch (e: Throwable) {
-                println(e)
+            proxy(HttpMethod.Post) {
+                url(call.request.uri)
             }
         }
     }
